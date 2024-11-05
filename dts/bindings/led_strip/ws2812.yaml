@@ -39,11 +39,10 @@ include: led-strip.yaml
 properties:
   reset-delay:
     type: int
-    default: 8
+    default: 50
     description: |
       Minimum delay to wait (in microseconds) to make sure that the strip has
-      latched the signal. If omitted, a default value of 8 microseconds is used.
-      This default is good for the WS2812 controllers. Note that despite the
+      latched the signal. If omitted, a default value of 50 microseconds is used.
+      This default is based on WS2812B controller datasheet. Note that despite the
       WS2812 datasheet states that a 50 microseconds delay is required, it seems
-      6 microseconds is enough. The default is set to 8 microseconds just to be
-      safe.
+      6 microseconds is enough. To play safe, use the datasheet value.

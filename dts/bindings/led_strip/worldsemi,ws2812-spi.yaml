@@ -27,9 +27,15 @@ properties:
   spi-one-frame:
     type: int
     required: true
-    description: 8-bit SPI frame to shift out for a 1 pulse.
+    description: SPI frame to shift out for a 1 pulse.
 
   spi-zero-frame:
     type: int
     required: true
-    description: 8-bit SPI frame to shift out for a 0 pulse.
+    description: SPI frame to shift out for a 0 pulse.
+
+  spi-frame-bits:
+    type: int
+    default: 8
+    description: |
+      Bits used from zero-frame and one-frame.

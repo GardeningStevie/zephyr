@@ -23,6 +23,9 @@ LOG_MODULE_REGISTER(ws2812_spi);
 #include <zephyr/sys/util.h>
 #include <zephyr/dt-bindings/led/led.h>
 
+/* bits per color for WS2812, WS2813, WS2814, WS2815 but not WS2816 */
+#define WS2812_BITS_PER_COLOR 8
+
 /* spi-one-frame and spi-zero-frame in DT are for 8-bit frames. */
 #define SPI_FRAME_BITS 8
 
@@ -39,8 +42,8 @@ LOG_MODULE_REGISTER(ws2812_spi);
 struct ws2812_spi_cfg {
 	struct spi_dt_spec bus;
 	uint8_t *px_buf;
-	uint8_t one_frame;
-	uint8_t zero_frame;
+	uint8_t frame_pattern[2];
+	uint8_t frame_bits;
 	uint8_t num_colors;
 	const uint8_t *color_mapping;
 	size_t length;
@@ -57,13 +60,23 @@ static const struct ws2812_spi_cfg *dev_cfg(const struct device *dev)
  * of SPI frames, MSbit first, where a one bit becomes SPI frame
  * one_frame, and zero bit becomes zero_frame.
  */
-static inline void ws2812_spi_ser(uint8_t buf[8], uint8_t color,
-				  const uint8_t one_frame, const uint8_t zero_frame)
+static inline void ws2812_spi_ser(uint8_t *buf, size_t *bit_offset, uint8_t color,
+				  const uint8_t *frame_pattern, const uint8_t frame_bits)
 {
-	int i;
+	for (uint8_t mask = BIT(WS2812_BITS_PER_COLOR - 1); mask != 0; mask >>= 1) {
+		uint8_t pattern = frame_pattern[(color & mask) ? 1 : 0];
+		size_t byte_offset = *bit_offset / SPI_FRAME_BITS;
+		size_t bits = *bit_offset % SPI_FRAME_BITS;
 
-	for (i = 0; i < 8; i++) {
-		buf[i] = color & BIT(7 - i) ? one_frame : zero_frame;
+		if (bits == 0) {
+			buf[byte_offset] = pattern;
+		} else {
+			buf[byte_offset] |= pattern >> bits;
+			if (bits > (SPI_FRAME_BITS - frame_bits)) {
+				buf[byte_offset + 1] = (pattern << (SPI_FRAME_BITS - bits));
+			}
+		}
+		*bit_offset += frame_bits;
 	}
 }
 
@@ -80,24 +93,27 @@ static int ws2812_strip_update_rgb(const struct device *dev,
 				   size_t num_pixels)
 {
 	const struct ws2812_spi_cfg *cfg = dev_cfg(dev);
-	const uint8_t one = cfg->one_frame, zero = cfg->zero_frame;
+	const uint8_t *frame_pattern = cfg->frame_pattern;
+	const uint8_t frame_bits = cfg->frame_bits;
+
 	struct spi_buf buf = {
 		.buf = cfg->px_buf,
-		.len = (cfg->length * 8 * cfg->num_colors),
+		.len = DIV_ROUND_UP(cfg->length * WS2812_BITS_PER_COLOR * cfg->num_colors *
+					     frame_bits,
+				     CHAR_BIT),
 	};
 	const struct spi_buf_set tx = {
 		.buffers = &buf,
 		.count = 1
 	};
-	uint8_t *px_buf = cfg->px_buf;
-	size_t i;
+	size_t bit_offset = 0;
 	int rc;
 
 	/*
 	 * Convert pixel data into SPI frames. Each frame has pixel data
 	 * in color mapping on-wire format (e.g. GRB, GRBW, RGB, etc).
 	 */
-	for (i = 0; i < num_pixels; i++) {
+	for (size_t i = 0; i < num_pixels; i++) {
 		uint8_t j;
 
 		for (j = 0; j < cfg->num_colors; j++) {
@@ -120,8 +136,7 @@ static int ws2812_strip_update_rgb(const struct device *dev,
 			default:
 				return -EINVAL;
 			}
-			ws2812_spi_ser(px_buf, pixel, one, zero);
-			px_buf += 8;
+			ws2812_spi_ser(cfg->px_buf, &bit_offset, pixel, frame_pattern, frame_bits);
 		}
 	}
 
@@ -178,12 +193,15 @@ static const struct led_strip_driver_api ws2812_spi_api = {
 	(DT_INST_PROP(idx, chain_length))
 #define WS2812_SPI_HAS_WHITE(idx) \
 	(DT_INST_PROP(idx, has_white_channel) == 1)
+#define WS2812_SPI_FRAME_BITS(idx) (DT_INST_PROP(idx, spi_frame_bits))
 #define WS2812_SPI_ONE_FRAME(idx) \
-	(DT_INST_PROP(idx, spi_one_frame))
+	(DT_INST_PROP(idx, spi_one_frame) << (SPI_FRAME_BITS - WS2812_SPI_FRAME_BITS(idx)))
 #define WS2812_SPI_ZERO_FRAME(idx) \
-	(DT_INST_PROP(idx, spi_zero_frame))
+	(DT_INST_PROP(idx, spi_zero_frame) << (SPI_FRAME_BITS - WS2812_SPI_FRAME_BITS(idx)))
 #define WS2812_SPI_BUFSZ(idx) \
-	(WS2812_NUM_COLORS(idx) * 8 * WS2812_SPI_NUM_PIXELS(idx))
+	DIV_ROUND_UP(WS2812_NUM_COLORS(idx) * WS2812_BITS_PER_COLOR * WS2812_SPI_NUM_PIXELS(idx) * \
+			     WS2812_SPI_FRAME_BITS(idx),                                           \
+		     CHAR_BIT)
 
 /*
  * Retrieve the channel to color mapping (e.g. RGB, BGR, GRB, ...) from the
@@ -207,8 +225,8 @@ static const struct led_strip_driver_api ws2812_spi_api = {
 	static const struct ws2812_spi_cfg ws2812_spi_##idx##_cfg = {	 \
 		.bus = SPI_DT_SPEC_INST_GET(idx, SPI_OPER(idx), 0),	 \
 		.px_buf = ws2812_spi_##idx##_px_buf,			 \
-		.one_frame = WS2812_SPI_ONE_FRAME(idx),			 \
-		.zero_frame = WS2812_SPI_ZERO_FRAME(idx),		 \
+		.frame_pattern = {WS2812_SPI_ZERO_FRAME(idx), WS2812_SPI_ONE_FRAME(idx)},          \
+		.frame_bits = WS2812_SPI_FRAME_BITS(idx),                                          \
 		.num_colors = WS2812_NUM_COLORS(idx),			 \
 		.color_mapping = ws2812_spi_##idx##_color_mapping,	 \
 		.length = DT_INST_PROP(idx, chain_length),               \
