@@ -11,6 +11,17 @@ properties:
     description: |
       ADC IO channel connected to this NTC thermistor.
 
+  pullup-regulator:
+    type: phandle
+    description: |
+      Reference to the regulator that controls the `pullup` voltage.
+      The referenced devicetree node must have a `regulator` compatible.
+
+      If set, the regulator voltage is queried with every temperature
+      measurement. The controller must therefore already be enabled.
+      Note that `pullup-regulator` has precedence over `pullup-uv` and
+      depends on CONFIG_REGULATOR.
+
   pullup-uv:
     type: int
     description: |

@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/pm/device_runtime.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util_macro.h>
 #include "ntc_thermistor.h"
 
 LOG_MODULE_REGISTER(NTC_THERMISTOR, CONFIG_SENSOR_LOG_LEVEL);
@@ -30,30 +33,57 @@ static int ntc_thermistor_sample_fetch(const struct device *dev, enum sensor_cha
 	struct ntc_thermistor_data *data = dev->data;
 	const struct ntc_thermistor_config *cfg = dev->config;
 	enum pm_device_state pm_state;
-	int res;
+	int res = 0;
 	struct adc_sequence sequence = {
 		.options = NULL,
 		.buffer = &data->raw,
 		.buffer_size = sizeof(data->raw),
 		.calibrate = false,
 	};
+	int32_t pullup_mv = cfg->ntc_cfg.pullup_mv;
 
 	(void)pm_device_state_get(dev, &pm_state);
 	if (pm_state != PM_DEVICE_STATE_ACTIVE) {
 		return -EIO;
 	}
 
+#ifdef CONFIG_REGULATOR
+	if (cfg->ntc_cfg.pullup_regulator) {
+		int32_t pullup_uv;
+
+		res = regulator_get_voltage(cfg->ntc_cfg.pullup_regulator, &pullup_uv);
+		pullup_mv = pullup_uv / 1000;
+		if (res) {
+			LOG_ERR("Failed to get regulator voltage (err %d)", res);
+			return res;
+		}
+	}
+#endif
+
 	k_mutex_lock(&data->mutex, K_FOREVER);
 
 	adc_sequence_init_dt(&cfg->adc_channel, &sequence);
 	res = adc_read(cfg->adc_channel.dev, &sequence);
+
+#ifdef CONFIG_REGULATOR
+	if (!res && cfg->ntc_cfg.pullup_regulator) {
+		int32_t pullup_uv;
+
+		res = regulator_get_voltage(cfg->ntc_cfg.pullup_regulator, &pullup_uv);
+		if (res || pullup_mv != pullup_uv / 1000) {
+			/* pullup voltage has changed during measurement. */
+			res = -ECANCELED;
+			LOG_ERR("Cancel measurment. Regulator voltage has changed");
+		}
+	}
+#endif
 	if (!res) {
-		if (cfg->ntc_cfg.pullup_mv) {
+		if (pullup_mv) {
 			int32_t val_mv = data->raw;
 
 			res = adc_raw_to_millivolts_dt(&cfg->adc_channel, &val_mv);
 			data->sample_val = val_mv;
-			data->sample_val_max = cfg->ntc_cfg.pullup_mv;
+			data->sample_val_max = pullup_mv;
 		} else {
 			data->sample_val = data->raw;
 			data->sample_val_max = BIT(cfg->adc_channel.resolution) - 1;
@@ -136,30 +166,33 @@ static int ntc_thermistor_pm_action(const struct device *dev, enum pm_device_act
 }
 #endif
 
+#define DEVICE_REGULATOR(inst) DEVICE_DT_GET_OR_NULL(DT_INST_PHANDLE(inst, pullup_regulator))
+
 #define NTC_THERMISTOR_DEFINE0(inst, id, _comp, _n_comp)                                           \
 	static struct ntc_thermistor_data ntc_thermistor_driver_##id##inst;                        \
                                                                                                    \
 	static const struct ntc_thermistor_config ntc_thermistor_cfg_##id##inst = {                \
 		.adc_channel = ADC_DT_SPEC_INST_GET(inst),                                         \
-		.ntc_cfg =                                                                         \
-			{                                                                          \
-				.pullup_mv = DT_INST_PROP_OR(inst, pullup_uv, 0) / 1000,           \
-				.pullup_ohm = DT_INST_PROP(inst, pullup_ohm),                      \
-				.pulldown_ohm = DT_INST_PROP(inst, pulldown_ohm),                  \
-				.connected_positive = DT_INST_PROP(inst, connected_positive),      \
-				.type = {                                                          \
-					.comp = _comp,                                             \
-					.n_comp = _n_comp,                                         \
-				},                                                                 \
-			},                                                                         \
+		.ntc_cfg = {                                                                       \
+			IF_ENABLED(CONFIG_REGULATOR, (.pullup_regulator = DEVICE_REGULATOR(inst))),\
+				    .pullup_mv = DT_INST_PROP_OR(inst, pullup_uv, 0) / 1000,       \
+				    .pullup_ohm = DT_INST_PROP(inst, pullup_ohm),                  \
+				    .pulldown_ohm = DT_INST_PROP(inst, pulldown_ohm),              \
+				    .connected_positive = DT_INST_PROP(inst, connected_positive),  \
+				    .type =                                                        \
+					    {                                                      \
+						    .comp = _comp,                                 \
+						    .n_comp = _n_comp,                             \
+					    },                                                     \
+				   },                                                              \
 	};                                                                                         \
                                                                                                    \
 	PM_DEVICE_DT_INST_DEFINE(inst, ntc_thermistor_pm_action);                                  \
                                                                                                    \
-	SENSOR_DEVICE_DT_INST_DEFINE(                                                              \
-		inst, ntc_thermistor_init, PM_DEVICE_DT_INST_GET(inst),                            \
-		&ntc_thermistor_driver_##id##inst, &ntc_thermistor_cfg_##id##inst, POST_KERNEL,    \
-		CONFIG_SENSOR_INIT_PRIORITY, &ntc_thermistor_driver_api);
+	SENSOR_DEVICE_DT_INST_DEFINE(inst, ntc_thermistor_init, PM_DEVICE_DT_INST_GET(inst),       \
+				     &ntc_thermistor_driver_##id##inst,                            \
+				     &ntc_thermistor_cfg_##id##inst, POST_KERNEL,                  \
+				     CONFIG_SENSOR_INIT_PRIORITY, &ntc_thermistor_driver_api);
 
 #define NTC_THERMISTOR_DEFINE(inst, id, comp) \
 	NTC_THERMISTOR_DEFINE0(inst, id, comp, ARRAY_SIZE(comp))

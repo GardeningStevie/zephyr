@@ -22,6 +22,9 @@ struct ntc_type {
 
 struct ntc_config {
 	bool connected_positive;
+#ifdef CONFIG_REGULATOR
+	const struct device *pullup_regulator;
+#endif
 	uint32_t pullup_mv;
 	uint32_t pullup_ohm;
 	uint32_t pulldown_ohm;
